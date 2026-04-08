@@ -6,13 +6,15 @@
 #include "spinlock.h"
 #include "proc.h"
 
+extern struct proc proc[NPROC];
+
 uint64
 sys_exit(void)
 {
   int n;
   argint(0, &n);
   exit(n);
-  return 0;  // not reached
+  return 0; // not reached
 }
 
 uint64
@@ -43,7 +45,7 @@ sys_sbrk(void)
 
   argint(0, &n);
   addr = myproc()->sz;
-  if(growproc(n) < 0)
+  if (growproc(n) < 0)
     return -1;
   return addr;
 }
@@ -57,8 +59,10 @@ sys_sleep(void)
   argint(0, &n);
   acquire(&tickslock);
   ticks0 = ticks;
-  while(ticks - ticks0 < n){
-    if(killed(myproc())){
+  while (ticks - ticks0 < n)
+  {
+    if (killed(myproc()))
+    {
       release(&tickslock);
       return -1;
     }
@@ -88,4 +92,50 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_co_yield(void)
+{
+  //PART 1
+  // get args
+  int pid;
+  int value;
+  argint(0, &pid);
+  argint(1, &value);
+
+  //check pid positivity
+  if(pid < 1) return -1;
+
+  //check pid not equal to caller pid
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  if (pid == p->pid){
+    release(&p->lock);
+    return -1;
+  } 
+  
+  //check pid is existing and not killed
+  struct proc *other;
+  int found_not_killed = 0;
+  for (other = proc; other < &proc[NPROC] && !found_not_killed; other++)
+  {
+    acquire(&other->lock);
+    if (other->pid == pid && other->killed == 0)
+    {
+      found_not_killed = 1;
+      //if found - do not release the lock
+      break;
+    }
+    release(&other->lock);
+  }
+  if(!found_not_killed) return -1;
+
+  //PART 2
+  //co_yield logic:
+  
+
+
+  //do not forget to release p, other locks
+
 }
