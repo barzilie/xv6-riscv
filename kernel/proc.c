@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "syscall.h"
 
 struct cpu cpus[NCPU];
 
@@ -680,4 +681,85 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64
+sys_co_yield(void)
+{
+  //PART 1
+  // get args
+  int pid; //other->pid
+  int value;
+  argint(0, &pid);
+  argint(1, &value);
+
+  //check pid positivity
+  if(pid < 1) return -1;
+
+  //check pid not equal to caller pid
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  if (pid == p->pid){
+    release(&p->lock);
+    return -1;
+  } 
+  release(&p->lock);
+  
+  //check pid is existing and not killed
+  struct proc *other;
+  int found_not_killed = 0;
+  for (other = proc; other < &proc[NPROC] && !found_not_killed; other++)
+  {
+    //panic: aquire solution for reaquiring when p == other
+    if (other == p) {
+      continue;
+    }
+    //create order to avoid deadlock
+    if(p > other){
+      acquire(&other->lock);
+      acquire(&p->lock);
+    }
+    else{
+      acquire(&p->lock);
+      acquire(&other->lock);
+    }
+    
+    if (other->pid == pid && other->killed == 0)
+    {
+      found_not_killed = 1;
+      //if found - do not release the locks
+      break;
+    }
+    release(&other->lock);
+    release(&p->lock);
+  }
+  if(!found_not_killed) return -1;
+
+  //PART 2
+  //co_yield logic:
+    p->trapframe->a0 = pid; //mark that curr_proc cooperates with other_proc
+    p->trapframe->a1 = value;
+
+    if (other->state == SLEEPING && other->chan == other && other->trapframe->a0 == p->pid) {
+        //pass the value
+        other->trapframe->a1 = value;
+        //allow other to wake up
+        other->state = RUNNABLE;
+    }
+    release(&other->lock);
+
+    //send p to sleep and pass control to scheduler
+    p->chan = p;
+    p->state = SLEEPING;
+    sched();
+
+    //reset channel
+    p->chan = 0;
+    //if we got here: other left us his value on a1
+    int return_value = p->trapframe->a1;
+
+    // do not forget to release p lock
+    release(&p->lock);
+
+    return return_value;
 }
