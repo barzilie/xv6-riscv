@@ -121,14 +121,15 @@ sys_co_yield(void)
   // check pid is existing and not killed
   struct proc *other;
   int found_not_killed = 0;
+  //go over all the possible proc-candidates
   for (other = proc; other < &proc[NPROC] && !found_not_killed; other++)
   {
-    // panic: aquire solution for reaquiring when p == other
+    // avoid panic: for reaquiring when p == other
     if (other == p)
     {
       continue;
     }
-    // create order to avoid deadlock
+    // create order to avoid deadlock - not for 1CPU but as a best prectice
     if (p > other)
     {
       acquire(&other->lock);
@@ -146,63 +147,89 @@ sys_co_yield(void)
       // if found - do not release the locks
       break;
     }
+    //otherwise - not found, release and return
     release(&other->lock);
     release(&p->lock);
   }
   if (!found_not_killed)
     return -1;
 
-  // 3. Check for the Rendezvous
- p->trapframe->a0 = pid; 
-  p->trapframe->a1 = value;
+  // mark yourself as ready for co_yield
+  p->trapframe->a0 = pid;
 
-  if (other->state == SLEEPING && other->chan == other && other->trapframe->a0 == p->pid) {
-      // --- TARGET IS PREPARED: DIRECT SWITCH PATH ---
-      
-      // Pass the value to the target
-      other->trapframe->a1 = value;
-      
-      // Manually change states, bypassing the RUNNABLE state entirely
-      other->state = RUNNING;
-      p->state = SLEEPING;
-      p->chan = p;
+  //the good case: other is ready for us to co_yeild
+  if (other->state == SLEEPING && other->chan == other && other->trapframe->a0 == p->pid)
+  {
 
-      // Bypass the normal scheduler by manually updating the CPU's running process
-      mycpu()->proc = other;
+    // pass the value to other
+    other->trapframe->a1 = value;
 
-      // LOCK HANDOFF:
-      // We currently hold BOTH p->lock and other->lock.
-      // We must release p->lock BEFORE switching so we don't hold it indefinitely.
-      // We MUST KEEP other->lock held, because 'other' expects it to be held when it wakes up!
-      release(&p->lock);
+    //change states and avoid the RUNNABLE state 
+    other->state = RUNNING;
+    p->state = SLEEPING;
+    p->chan = p;
 
-      // Perform the direct process-to-process context switch
-      swtch(&p->context, &other->context);
+    // bypass scheduler by updating the cpu running process
+    mycpu()->proc = other;
 
-      // When 'p' eventually wakes up here later, it means another process directly 
-      // switched back to it. That other process left p->lock held, so we must release it now.
-      release(&p->lock);
-      
-  } else {
-      // --- TARGET NOT PREPARED: SCHEDULER PATH ---
-      
-      // Target is not waiting for us. We must sleep until it is prepared.
-      // We don't need the target's lock to go to sleep, so release it.
-      release(&other->lock);
-      
-      p->state = SLEEPING;
-      p->chan = p;
-      
-      // Go to sleep via the normal scheduler
-      sched();
-      
-      // When 'p' wakes up from sched(), its lock will be held.
-      release(&p->lock);
+    //just before switching, leaving only other lock in our hand
+    release(&p->lock);
+
+    // direct context switch
+    swtch(&p->context, &other->context);
+
+    //p wakes up here when another process directly pass control to it
+    //p->lock passed by other and we release it now
+    release(&p->lock);
+  }
+  else
+  {
+    // other is not ready for co_yield and we go to sleep
+    // release other lock so scheduler can take him
+    release(&other->lock);
+
+    p->state = SLEEPING;
+    p->chan = p;
+
+    //pass control through scheduler, allowing him to initiate other
+    sched();
+
+    //here we wake up from other switch directly 
+    //before returning the value we mark ourselves as not ready
+    p->trapframe->a0 = 0;
+    
+    //p wakes up from sched() becease switch direct so its lock is taken and we should release it
+    release(&p->lock);
   }
 
-  // Cleanup and return
+  //release channel
   p->chan = 0;
-  
-  // If we got here, 'other' left its value in our a1 register
+
+  // other left its value in our a1 register
   return p->trapframe->a1;
+  //after we return, other will wake up by scheduler some day
+  //we wil return to userspace
+  //recalling co_yield from the loop will send us to the same dance, over and over...
+  //eventullay no one will reach the first sched() but the first process to co_yield
 }
+
+// scheduler holds p1----------------------
+// p1  -> co_yield(p2) p1->a1 = pid2
+// p2->a1 \= pid1  RESULT: p1 sleeps + sched()
+// scheduler holds p2---------------------
+// p2 -> co_yield(p1) p2->a1 = pid1 (signals)
+// p1->a1 = pid2 RESULTS  p2 sleeps p2(locks)
+// swtch to p1:
+// wakes up after sched():
+// releases
+// return p1->a0
+// p1 -> co_yield(p2) p1->a1 = pid2 (signals)
+// p2->a1 = pid1 RESULTS  p1 sleeps p1(locks)
+// swtch to p2:
+// wakes up after swtch
+// releases
+// return p2->a0
+// p2 -> co_yield(p1) p2->a1 = pid1 (signals)
+// ....
+// scheduler holds p2 now and on
+// once timer interrupt is received, scheduler will try to re-release p2 lock specifically
